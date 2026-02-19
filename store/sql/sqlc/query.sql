@@ -22,7 +22,7 @@ WHERE txid = :txid AND vout = :vout;
 
 -- name: SelectSpendableVtxos :many
 SELECT * FROM asset_vtxo_vw
-WHERE spent = false AND unrolled = false;
+WHERE spent = false AND unrolled = false AND swept = false;
 
 -- name: CleanVtxos :exec
 DELETE FROM vtxo;

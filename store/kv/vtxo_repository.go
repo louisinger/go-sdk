@@ -166,7 +166,7 @@ func (s *vtxoStore) GetSpendableVtxos(ctx context.Context) (spendable []types.Vt
 	}
 
 	for _, vtxo := range allVtxos {
-		if !vtxo.Spent && !vtxo.Unrolled {
+		if !vtxo.Spent && !vtxo.Unrolled && !vtxo.Swept {
 			spendable = append(spendable, vtxo)
 		}
 	}
