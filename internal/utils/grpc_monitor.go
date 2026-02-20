@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -10,6 +11,8 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 )
+
+const cloudflare524Error = "524"
 
 func MonitorGrpcConn(
 	ctx context.Context, conn *grpc.ClientConn, onReconnect func(ctx context.Context) error,
@@ -55,6 +58,11 @@ func MonitorGrpcConn(
 // ShouldReconnect checks if a gRPC error should trigger a reconnection attempt
 // and returns the backoff duration if reconnection should be attempted
 func ShouldReconnect(err error) (bool, time.Duration) {
+	if strings.Contains(err.Error(), cloudflare524Error) {
+		// cloudflare 524 error is a timeout error, so we should reconnect
+		return true, 5 * time.Second
+	}
+
 	st, ok := status.FromError(err)
 	if !ok {
 		return true, time.Second

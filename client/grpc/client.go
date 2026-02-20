@@ -23,11 +23,9 @@ import (
 )
 
 const (
-	initialDelay       = 5 * time.Second
-	maxDelay           = 60 * time.Second
-	multiplier         = 2.0
-	cloudflare524Error = "524"
-	// Reconnection constants
+	initialDelay   = 5 * time.Second
+	maxDelay       = 60 * time.Second
+	multiplier     = 2.0
 	initialBackoff = time.Second
 	maxBackoff     = 30 * time.Second
 )
