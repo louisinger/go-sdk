@@ -3137,6 +3137,7 @@ func (a *arkClient) getVtxos(ctx context.Context, opts *CoinSelectOptions) ([]ty
 	recoverableVtxos := make([]types.Vtxo, 0)
 	spendableVtxos := make([]types.Vtxo, 0, len(spendable))
 	if opts != nil && opts.WithRecoverableVtxos {
+		// For settlement/collaborative exit: include both recoverable (swept) and normal VTXOs
 		for _, vtxo := range spendable {
 			if vtxo.IsRecoverable() {
 				recoverableVtxos = append(recoverableVtxos, vtxo)
@@ -3145,8 +3146,12 @@ func (a *arkClient) getVtxos(ctx context.Context, opts *CoinSelectOptions) ([]ty
 			spendableVtxos = append(spendableVtxos, vtxo)
 		}
 	} else {
-		spendableVtxos = make([]types.Vtxo, len(spendable))
-		copy(spendableVtxos, spendable)
+		// For offchain payments: exclude swept VTXOs (not usable in offchain txs)
+		for _, vtxo := range spendable {
+			if !vtxo.Swept {
+				spendableVtxos = append(spendableVtxos, vtxo)
+			}
+		}
 	}
 
 	allVtxos := append(recoverableVtxos, spendableVtxos...)

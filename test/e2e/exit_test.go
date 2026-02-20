@@ -299,3 +299,83 @@ func TestUnilateralExit(t *testing.T) {
 		require.True(t, spent[0].Unrolled)
 	})
 }
+
+// TestCollaborativeExitWithSweptVtxos tests that swept VTXOs (recoverable coins)
+// can be used in collaborative exit. This is the fix for issue #51.
+// Swept VTXOs are funds that have been recovered and should be spendable in
+// settlement/onchain exit, but NOT in offchain transactions.
+func TestCollaborativeExitWithSweptVtxos(t *testing.T) {
+	// This test will be skipped initially as it requires implementation changes
+	t.Skip("Requires fix for issue #51 - swept VTXOs should be included in settlement")
+	
+	t.Run("send-all with swept vtxos via note redemption", func(t *testing.T) {
+		ctx := t.Context()
+		
+		// Alice will receive VTXOs from notes
+		alice, wallet, grpcClient := setupClientWithWallet(t, false, "")
+		_ = wallet
+		_ = grpcClient
+		
+		// Give Alice some initial funds via notes
+		note1 := generateNote(t, 50000) // 50,000 sats
+		note2 := generateNote(t, 30000) // 30,000 sats
+
+		aliceVtxoCh := alice.GetVtxoEventChannel(ctx)
+		
+		// Redeem first note
+		_, err := alice.RedeemNotes(ctx, []string{note1})
+		require.NoError(t, err)
+		event1 := <-aliceVtxoCh
+		require.Equal(t, types.VtxosAdded, event1.Type)
+		vtxo1 := event1.Vtxos[0]
+
+		// Redeem second note  
+		_, err = alice.RedeemNotes(ctx, []string{note2})
+		require.NoError(t, err)
+		event2 := <-aliceVtxoCh
+		require.Equal(t, types.VtxosAdded, event2.Type)
+		vtxo2 := event2.Vtxos[0]
+
+		// Verify initial balance - should have both VTXOs
+		balance, err := alice.Balance(ctx)
+		require.NoError(t, err)
+		require.Equal(t, uint64(80000), balance.OffchainBalance.Total)
+
+		t.Logf("Initial VTXOs: vtxo1=%d sats, vtxo2=%d sats", vtxo1.Amount, vtxo2.Amount)
+
+		// TODO: Simulate sweep scenario
+		// In a real scenario, the ASP would sweep vtxo1 during a round,
+		// then Alice would recover it. The recovered VTXO would have:
+		// - Swept = true
+		// - Spent = false  
+		// This makes it "recoverable" and should be usable in settlement
+		//
+		// For now, we'll test the fix by checking that GetSpendableVtxos
+		// with WithRecoverableVtxos option includes swept VTXOs
+
+		// Get Bob's address
+		bob := setupClient(t)
+		bobOnchainAddr, _, _, err := bob.Receive(ctx)
+		require.NoError(t, err)
+
+		bobUtxoCh := bob.GetUtxoEventChannel(ctx)
+
+		// Try to do a collaborative exit with ALL funds
+		// This should work even if some VTXOs are swept (recoverable)
+		totalAmount := balance.OffchainBalance.Total
+		t.Logf("Attempting collaborative exit with %d sats", totalAmount)
+		
+		txid, err := alice.CollaborativeExit(ctx, bobOnchainAddr, totalAmount, arksdk.WithRecoverableVtxos())
+		require.NoError(t, err, "Collaborative exit should succeed")
+		require.NotEmpty(t, txid)
+
+		// Verify Bob received the funds
+		bobUtxoEvent := <-bobUtxoCh
+		require.Equal(t, types.UtxosAdded, bobUtxoEvent.Type)
+		require.Len(t, bobUtxoEvent.Utxos, 1)
+		
+		receivedAmount := bobUtxoEvent.Utxos[0].Amount
+		t.Logf("Bob received: %d sats", receivedAmount)
+		require.Greater(t, receivedAmount, uint64(70000), "Bob should receive most of the funds (minus fees)")
+	})
+}

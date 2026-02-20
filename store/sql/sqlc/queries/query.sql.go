@@ -369,8 +369,11 @@ func (q *Queries) SelectAsset(ctx context.Context, assetID string) (Asset, error
 }
 
 const selectSpendableVtxos = `-- name: SelectSpendableVtxos :many
+-- Include both normal VTXOs and swept VTXOs (recoverable coins)
+-- Swept VTXOs (swept=true, spent=false) are usable in settlement/collaborative exit
+-- The caller is responsible for filtering between offchain-only vs settlement paths
 SELECT txid, vout, script, amount, commitment_txids, spent_by, spent, expires_at, created_at, preconfirmed, swept, settled_by, unrolled, ark_txid, asset_id, asset_amount FROM asset_vtxo_vw
-WHERE spent = false AND unrolled = false AND swept = false
+WHERE spent = false AND unrolled = false
 `
 
 func (q *Queries) SelectSpendableVtxos(ctx context.Context) ([]AssetVtxoVw, error) {

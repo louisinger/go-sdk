@@ -166,7 +166,10 @@ func (s *vtxoStore) GetSpendableVtxos(ctx context.Context) (spendable []types.Vt
 	}
 
 	for _, vtxo := range allVtxos {
-		if !vtxo.Spent && !vtxo.Unrolled && !vtxo.Swept {
+		// Include both normal VTXOs and swept VTXOs (recoverable coins)
+		// Swept VTXOs (swept=true, spent=false) are usable in settlement/collaborative exit
+		// The caller is responsible for filtering between offchain-only vs settlement paths
+		if !vtxo.Spent && !vtxo.Unrolled {
 			spendable = append(spendable, vtxo)
 		}
 	}

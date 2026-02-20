@@ -21,8 +21,11 @@ FROM asset_vtxo_vw
 WHERE txid = :txid AND vout = :vout;
 
 -- name: SelectSpendableVtxos :many
+-- Include both normal VTXOs and swept VTXOs (recoverable coins)
+-- Swept VTXOs (swept=true, spent=false) are usable in settlement/collaborative exit
+-- The caller is responsible for filtering between offchain-only vs settlement paths
 SELECT * FROM asset_vtxo_vw
-WHERE spent = false AND unrolled = false AND swept = false;
+WHERE spent = false AND unrolled = false;
 
 -- name: CleanVtxos :exec
 DELETE FROM vtxo;
