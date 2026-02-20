@@ -20,15 +20,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const (
-	initialDelay = 5 * time.Second
-	maxDelay     = 60 * time.Second
-	multiplier   = 2.0
-
-	initialBackoff = time.Second
-	maxBackoff     = 30 * time.Second
-)
-
 type grpcClient struct {
 	conn             *grpc.ClientConn
 	connMu           sync.RWMutex
@@ -86,7 +77,7 @@ func NewClient(serverUrl string) (indexer.Indexer, error) {
 }
 
 func (c *grpcClient) waitForServerReady(ctx context.Context) error {
-	delay := initialDelay
+	delay := utils.GrpcReconnectConfig.InitialDelay
 	attempt := 0
 
 	// Create a temporary client to test the server
@@ -118,7 +109,7 @@ func (c *grpcClient) waitForServerReady(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(delay):
 			// Increase delay for next attempt
-			delay = min(time.Duration(float64(delay)*multiplier), maxDelay)
+			delay = min(time.Duration(float64(delay)*utils.GrpcReconnectConfig.Multiplier), utils.GrpcReconnectConfig.MaxDelay)
 		}
 	}
 }
@@ -528,7 +519,7 @@ func (a *grpcClient) GetSubscription(
 	go func() {
 		defer close(eventsCh)
 
-		backoff := initialBackoff
+		backoff := utils.GrpcReconnectConfig.InitialDelay
 
 		for {
 			resp, err := stream.Recv()
@@ -562,18 +553,18 @@ func (a *grpcClient) GetSubscription(
 
 				stream, err = a.svc().GetSubscription(ctx, req)
 				if err != nil {
-					backoff = time.Duration(float64(backoff) * multiplier)
-					backoff = min(backoff, maxBackoff)
+					backoff = time.Duration(float64(backoff) * utils.GrpcReconnectConfig.Multiplier)
+					backoff = min(backoff, utils.GrpcReconnectConfig.MaxDelay)
 					log.Debugf("reconnection failed, will retry: %v", err)
 					continue
 				}
 
-				backoff = initialBackoff
+				backoff = utils.GrpcReconnectConfig.InitialDelay
 				log.Debug("subscription stream reconnected successfully")
 				continue
 			}
 
-			backoff = initialBackoff
+			backoff = utils.GrpcReconnectConfig.InitialDelay
 
 			var checkpointTxs map[string]indexer.TxData
 			var event *arkv1.IndexerSubscriptionEvent

@@ -2,15 +2,26 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 )
+
+// shared vars for grpc reconnection backoff
+var GrpcReconnectConfig = struct {
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+	Multiplier   float64
+}{
+	InitialDelay: 5 * time.Second,
+	MaxDelay:     60 * time.Second,
+	Multiplier:   2.0,
+}
 
 const cloudflare524Error = "524"
 
@@ -23,17 +34,20 @@ func MonitorGrpcConn(
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("MonitorGrpcConn: exiting (context cancelled)")
 			return
 		default:
 			currentState := conn.GetState()
 
 			if conn.WaitForStateChange(ctx, currentState) {
 				newState := conn.GetState()
+				fmt.Println("MonitorGrpcConn: state changed", currentState.String(), "->", newState.String())
 
 				// Track if we've seen the initial Ready state
 				if newState == connectivity.Ready && !firstReadySeen {
 					firstReadySeen = true
 					wasDisconnected = false
+					fmt.Println("MonitorGrpcConn: gRPC connection ready (initial)")
 					continue
 				}
 
@@ -41,14 +55,18 @@ func MonitorGrpcConn(
 				if !wasDisconnected && newState == connectivity.TransientFailure ||
 					newState == connectivity.Shutdown {
 					wasDisconnected = true
+					fmt.Println("MonitorGrpcConn: disconnected, state=", newState.String(), ", triggering reconnect")
 					if err := onReconnect(ctx); err != nil {
-						logrus.WithError(err).Error("failed to reconnect to grpc server")
+						fmt.Println("MonitorGrpcConn: failed to reconnect:", err)
+					} else {
+						fmt.Println("MonitorGrpcConn: reconnect callback completed successfully")
 					}
 				}
 
 				// Only trigger callback if we're recovering from a disconnection
 				if newState == connectivity.Ready && wasDisconnected {
 					wasDisconnected = false
+					fmt.Println("MonitorGrpcConn: connection recovered (Ready after disconnect)")
 				}
 			}
 		}

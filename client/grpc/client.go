@@ -22,14 +22,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const (
-	initialDelay   = 5 * time.Second
-	maxDelay       = 60 * time.Second
-	multiplier     = 2.0
-	initialBackoff = time.Second
-	maxBackoff     = 30 * time.Second
-)
-
 type grpcClient struct {
 	conn             *grpc.ClientConn
 	connMu           sync.RWMutex
@@ -83,7 +75,7 @@ func NewClient(serverUrl string) (client.TransportClient, error) {
 }
 
 func (c *grpcClient) waitForServerReady(ctx context.Context) error {
-	delay := initialDelay
+	delay := utils.GrpcReconnectConfig.InitialDelay
 	attempt := 0
 
 	// Create a temporary client to test the server
@@ -111,7 +103,7 @@ func (c *grpcClient) waitForServerReady(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(delay):
 			// Increase delay for next attempt
-			delay = min(time.Duration(float64(delay)*multiplier), maxDelay)
+			delay = min(time.Duration(float64(delay)*utils.GrpcReconnectConfig.Multiplier), utils.GrpcReconnectConfig.MaxDelay)
 		}
 	}
 }
@@ -312,7 +304,7 @@ func (a *grpcClient) GetEventStream(
 	go func() {
 		defer close(eventsCh)
 
-		backoff := initialBackoff
+		backoff := utils.GrpcReconnectConfig.InitialDelay
 
 		for {
 			resp, err := stream.Recv()
@@ -347,18 +339,18 @@ func (a *grpcClient) GetEventStream(
 
 				stream, err = a.svc().GetEventStream(ctx, req)
 				if err != nil {
-					backoff = time.Duration(float64(backoff) * multiplier)
-					backoff = min(backoff, maxBackoff)
+					backoff = time.Duration(float64(backoff) * utils.GrpcReconnectConfig.Multiplier)
+					backoff = min(backoff, utils.GrpcReconnectConfig.MaxDelay)
 					log.Debugf("reconnection failed, will retry: %v", err)
 					continue
 				}
 
-				backoff = initialBackoff
+				backoff = utils.GrpcReconnectConfig.InitialDelay
 				log.Debug("event stream reconnected successfully")
 				continue
 			}
 
-			backoff = initialBackoff
+			backoff = utils.GrpcReconnectConfig.InitialDelay
 
 			switch resp.Event.(type) {
 			case *arkv1.GetEventStreamResponse_StreamStarted:
@@ -468,7 +460,7 @@ func (c *grpcClient) GetTransactionsStream(
 	go func() {
 		defer close(eventsCh)
 
-		backoff := initialBackoff
+		backoff := utils.GrpcReconnectConfig.InitialDelay
 
 		for {
 			resp, err := stream.Recv()
@@ -503,18 +495,18 @@ func (c *grpcClient) GetTransactionsStream(
 
 				stream, err = c.svc().GetTransactionsStream(ctx, req)
 				if err != nil {
-					backoff = time.Duration(float64(backoff) * multiplier)
-					backoff = min(backoff, maxBackoff)
+					backoff = time.Duration(float64(backoff) * utils.GrpcReconnectConfig.Multiplier)
+					backoff = min(backoff, utils.GrpcReconnectConfig.MaxDelay)
 					log.Debugf("reconnection failed, will retry: %v", err)
 					continue
 				}
 
-				backoff = initialBackoff
+				backoff = utils.GrpcReconnectConfig.InitialDelay
 				log.Debug("transaction stream reconnected successfully")
 				continue
 			}
 
-			backoff = initialBackoff
+			backoff = utils.GrpcReconnectConfig.InitialDelay
 
 			switch tx := resp.GetData().(type) {
 			case *arkv1.GetTransactionsStreamResponse_CommitmentTx:
