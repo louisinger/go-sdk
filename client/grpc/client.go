@@ -29,6 +29,9 @@ const (
 	maxDelay           = 60 * time.Second
 	multiplier         = 2.0
 	cloudflare524Error = "524"
+	// Reconnection constants
+	initialBackoff = time.Second
+	maxBackoff     = 30 * time.Second
 )
 
 type grpcClient struct {
@@ -81,6 +84,32 @@ func NewClient(serverUrl string) (client.TransportClient, error) {
 	})
 
 	return client, nil
+}
+
+// shouldReconnect checks if an error should trigger a reconnection attempt
+// and returns the backoff duration if reconnection should be attempted
+func shouldReconnect(err error) (bool, time.Duration) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return true, time.Second // Unknown error, try reconnect
+	}
+
+	switch st.Code() {
+	case codes.Unavailable:
+		return true, time.Second // Server down
+	case codes.ResourceExhausted:
+		return true, 5 * time.Second // Rate limited
+	case codes.DeadlineExceeded:
+		return true, time.Second // Timeout
+	case codes.Internal:
+		return true, time.Second // Server error
+	case codes.Canceled:
+		return false, 0 // Client cancelled
+	case codes.InvalidArgument:
+		return false, 0 // Bad request
+	default:
+		return true, time.Second
+	}
 }
 
 func (c *grpcClient) waitForServerReady(ctx context.Context) error {
@@ -302,6 +331,7 @@ func (a *grpcClient) GetEventStream(
 
 	req := &arkv1.GetEventStreamRequest{Topics: topics}
 
+	// Initial connection attempt
 	stream, err := a.svc().GetEventStream(ctx, req)
 	if err != nil {
 		cancel()
@@ -313,6 +343,8 @@ func (a *grpcClient) GetEventStream(
 	go func() {
 		defer close(eventsCh)
 
+		backoff := initialBackoff
+
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
@@ -320,29 +352,56 @@ func (a *grpcClient) GetEventStream(
 					eventsCh <- client.BatchEventChannel{Err: client.ErrConnectionClosedByServer}
 					return
 				}
-				st, ok := status.FromError(err)
-				if ok {
-					switch st.Code() {
-					case codes.Canceled:
-						return
-					case codes.Unknown:
-						errMsg := st.Message()
-						// Check if it's a 524 error during stream reading
-						if strings.Contains(errMsg, cloudflare524Error) {
-							stream, err = a.svc().GetEventStream(ctx, req)
-							if err != nil {
-								eventsCh <- client.BatchEventChannel{Err: err}
-								return
-							}
 
-							continue
-						}
-					}
+				// Check if we should attempt reconnection
+				shouldRetry, retryDelay := shouldReconnect(err)
+				if !shouldRetry {
+					// Don't reconnect for client-cancelled or invalid requests
+					eventsCh <- client.BatchEventChannel{Err: err}
+					return
 				}
 
-				eventsCh <- client.BatchEventChannel{Err: err}
-				return
+				// Respect context cancellation
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// Exponential backoff with max cap
+				sleepDuration := backoff
+				if retryDelay > backoff {
+					sleepDuration = retryDelay
+				}
+
+				log.Debugf("event stream error, reconnecting in %v: %v", sleepDuration, err)
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sleepDuration):
+				}
+
+				// Attempt reconnection
+				stream, err = a.svc().GetEventStream(ctx, req)
+				if err != nil {
+					// Reconnection failed, increase backoff
+					backoff = time.Duration(float64(backoff) * multiplier)
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					log.Debugf("reconnection failed, will retry: %v", err)
+					continue
+				}
+
+				// Reconnection succeeded, reset backoff
+				backoff = initialBackoff
+				log.Debug("event stream reconnected successfully")
+				continue
 			}
+
+			// Reset backoff on successful receive
+			backoff = initialBackoff
 
 			switch resp.Event.(type) {
 			case *arkv1.GetEventStreamResponse_StreamStarted:
@@ -441,6 +500,7 @@ func (c *grpcClient) GetTransactionsStream(
 
 	req := &arkv1.GetTransactionsStreamRequest{}
 
+	// Initial connection attempt
 	stream, err := c.svc().GetTransactionsStream(ctx, req)
 	if err != nil {
 		cancel()
@@ -452,6 +512,8 @@ func (c *grpcClient) GetTransactionsStream(
 	go func() {
 		defer close(eventsCh)
 
+		backoff := initialBackoff
+
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
@@ -459,28 +521,56 @@ func (c *grpcClient) GetTransactionsStream(
 					eventsCh <- client.TransactionEvent{Err: client.ErrConnectionClosedByServer}
 					return
 				}
-				st, ok := status.FromError(err)
-				if ok {
-					switch st.Code() {
-					case codes.Canceled:
-						return
-					case codes.Unknown:
-						errMsg := st.Message()
-						// Check if it's a 524 error during stream reading
-						if strings.Contains(errMsg, cloudflare524Error) {
-							stream, err = c.svc().GetTransactionsStream(ctx, req)
-							if err != nil {
-								eventsCh <- client.TransactionEvent{Err: err}
-								return
-							}
 
-							continue
-						}
-					}
+				// Check if we should attempt reconnection
+				shouldRetry, retryDelay := shouldReconnect(err)
+				if !shouldRetry {
+					// Don't reconnect for client-cancelled or invalid requests
+					eventsCh <- client.TransactionEvent{Err: err}
+					return
 				}
-				eventsCh <- client.TransactionEvent{Err: err}
-				return
+
+				// Respect context cancellation
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// Exponential backoff with max cap
+				sleepDuration := backoff
+				if retryDelay > backoff {
+					sleepDuration = retryDelay
+				}
+
+				log.Debugf("transaction stream error, reconnecting in %v: %v", sleepDuration, err)
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sleepDuration):
+				}
+
+				// Attempt reconnection
+				stream, err = c.svc().GetTransactionsStream(ctx, req)
+				if err != nil {
+					// Reconnection failed, increase backoff
+					backoff = time.Duration(float64(backoff) * multiplier)
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					log.Debugf("reconnection failed, will retry: %v", err)
+					continue
+				}
+
+				// Reconnection succeeded, reset backoff
+				backoff = initialBackoff
+				log.Debug("transaction stream reconnected successfully")
+				continue
 			}
+
+			// Reset backoff on successful receive
+			backoff = initialBackoff
 
 			switch tx := resp.GetData().(type) {
 			case *arkv1.GetTransactionsStreamResponse_CommitmentTx:
