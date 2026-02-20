@@ -18,10 +18,8 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -84,32 +82,6 @@ func NewClient(serverUrl string) (client.TransportClient, error) {
 	})
 
 	return client, nil
-}
-
-// shouldReconnect checks if an error should trigger a reconnection attempt
-// and returns the backoff duration if reconnection should be attempted
-func shouldReconnect(err error) (bool, time.Duration) {
-	st, ok := status.FromError(err)
-	if !ok {
-		return true, time.Second // Unknown error, try reconnect
-	}
-
-	switch st.Code() {
-	case codes.Unavailable:
-		return true, time.Second // Server down
-	case codes.ResourceExhausted:
-		return true, 5 * time.Second // Rate limited
-	case codes.DeadlineExceeded:
-		return true, time.Second // Timeout
-	case codes.Internal:
-		return true, time.Second // Server error
-	case codes.Canceled:
-		return false, 0 // Client cancelled
-	case codes.InvalidArgument:
-		return false, 0 // Bad request
-	default:
-		return true, time.Second
-	}
 }
 
 func (c *grpcClient) waitForServerReady(ctx context.Context) error {
@@ -331,7 +303,6 @@ func (a *grpcClient) GetEventStream(
 
 	req := &arkv1.GetEventStreamRequest{Topics: topics}
 
-	// Initial connection attempt
 	stream, err := a.svc().GetEventStream(ctx, req)
 	if err != nil {
 		cancel()
@@ -353,26 +324,20 @@ func (a *grpcClient) GetEventStream(
 					return
 				}
 
-				// Check if we should attempt reconnection
-				shouldRetry, retryDelay := shouldReconnect(err)
+				shouldRetry, retryDelay := utils.ShouldReconnect(err)
 				if !shouldRetry {
-					// Don't reconnect for client-cancelled or invalid requests
 					eventsCh <- client.BatchEventChannel{Err: err}
 					return
 				}
 
-				// Respect context cancellation
+				// if context cancelled, return
 				select {
 				case <-ctx.Done():
 					return
 				default:
 				}
 
-				// Exponential backoff with max cap
-				sleepDuration := backoff
-				if retryDelay > backoff {
-					sleepDuration = retryDelay
-				}
+				sleepDuration := max(retryDelay, backoff)
 
 				log.Debugf("event stream error, reconnecting in %v: %v", sleepDuration, err)
 
@@ -382,25 +347,19 @@ func (a *grpcClient) GetEventStream(
 				case <-time.After(sleepDuration):
 				}
 
-				// Attempt reconnection
 				stream, err = a.svc().GetEventStream(ctx, req)
 				if err != nil {
-					// Reconnection failed, increase backoff
 					backoff = time.Duration(float64(backoff) * multiplier)
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
+					backoff = min(backoff, maxBackoff)
 					log.Debugf("reconnection failed, will retry: %v", err)
 					continue
 				}
 
-				// Reconnection succeeded, reset backoff
 				backoff = initialBackoff
 				log.Debug("event stream reconnected successfully")
 				continue
 			}
 
-			// Reset backoff on successful receive
 			backoff = initialBackoff
 
 			switch resp.Event.(type) {
@@ -500,7 +459,6 @@ func (c *grpcClient) GetTransactionsStream(
 
 	req := &arkv1.GetTransactionsStreamRequest{}
 
-	// Initial connection attempt
 	stream, err := c.svc().GetTransactionsStream(ctx, req)
 	if err != nil {
 		cancel()
@@ -522,26 +480,20 @@ func (c *grpcClient) GetTransactionsStream(
 					return
 				}
 
-				// Check if we should attempt reconnection
-				shouldRetry, retryDelay := shouldReconnect(err)
+				shouldRetry, retryDelay := utils.ShouldReconnect(err)
 				if !shouldRetry {
-					// Don't reconnect for client-cancelled or invalid requests
 					eventsCh <- client.TransactionEvent{Err: err}
 					return
 				}
 
-				// Respect context cancellation
+				// if context cancelled, return
 				select {
 				case <-ctx.Done():
 					return
 				default:
 				}
 
-				// Exponential backoff with max cap
-				sleepDuration := backoff
-				if retryDelay > backoff {
-					sleepDuration = retryDelay
-				}
+				sleepDuration := max(retryDelay, backoff)
 
 				log.Debugf("transaction stream error, reconnecting in %v: %v", sleepDuration, err)
 
@@ -551,25 +503,19 @@ func (c *grpcClient) GetTransactionsStream(
 				case <-time.After(sleepDuration):
 				}
 
-				// Attempt reconnection
 				stream, err = c.svc().GetTransactionsStream(ctx, req)
 				if err != nil {
-					// Reconnection failed, increase backoff
 					backoff = time.Duration(float64(backoff) * multiplier)
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
+					backoff = min(backoff, maxBackoff)
 					log.Debugf("reconnection failed, will retry: %v", err)
 					continue
 				}
 
-				// Reconnection succeeded, reset backoff
 				backoff = initialBackoff
 				log.Debug("transaction stream reconnected successfully")
 				continue
 			}
 
-			// Reset backoff on successful receive
 			backoff = initialBackoff
 
 			switch tx := resp.GetData().(type) {

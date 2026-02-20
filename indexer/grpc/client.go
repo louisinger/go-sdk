@@ -16,17 +16,17 @@ import (
 	"github.com/arkade-os/go-sdk/types"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 )
 
 const (
-	initialDelay       = 5 * time.Second
-	maxDelay           = 60 * time.Second
-	multiplier         = 2.0
-	cloudflare524Error = "524"
+	initialDelay = 5 * time.Second
+	maxDelay     = 60 * time.Second
+	multiplier   = 2.0
+
+	initialBackoff = time.Second
+	maxBackoff     = 30 * time.Second
 )
 
 type grpcClient struct {
@@ -528,6 +528,8 @@ func (a *grpcClient) GetSubscription(
 	go func() {
 		defer close(eventsCh)
 
+		backoff := initialBackoff
+
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
@@ -536,29 +538,42 @@ func (a *grpcClient) GetSubscription(
 					return
 				}
 
-				st, ok := status.FromError(err)
-				if ok {
-					switch st.Code() {
-					case codes.Canceled:
-						return
-					case codes.Unknown:
-						errMsg := st.Message()
-						// Check if it's a 524 error during stream reading
-						if strings.Contains(errMsg, cloudflare524Error) {
-							stream, err = a.svc().GetSubscription(ctx, req)
-							if err != nil {
-								eventsCh <- &indexer.ScriptEvent{Err: err}
-								return
-							}
-
-							continue
-						}
-					}
+				shouldRetry, retryDelay := utils.ShouldReconnect(err)
+				if !shouldRetry {
+					eventsCh <- &indexer.ScriptEvent{Err: err}
+					return
 				}
 
-				eventsCh <- &indexer.ScriptEvent{Err: err}
-				return
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				sleepDuration := max(retryDelay, backoff)
+
+				log.Debugf("subscription stream error, reconnecting in %v: %v", sleepDuration, err)
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sleepDuration):
+				}
+
+				stream, err = a.svc().GetSubscription(ctx, req)
+				if err != nil {
+					backoff = time.Duration(float64(backoff) * multiplier)
+					backoff = min(backoff, maxBackoff)
+					log.Debugf("reconnection failed, will retry: %v", err)
+					continue
+				}
+
+				backoff = initialBackoff
+				log.Debug("subscription stream reconnected successfully")
+				continue
 			}
+
+			backoff = initialBackoff
 
 			var checkpointTxs map[string]indexer.TxData
 			var event *arkv1.IndexerSubscriptionEvent
@@ -585,13 +600,13 @@ func (a *grpcClient) GetSubscription(
 					CheckpointTxs: checkpointTxs,
 				}
 			}
-
 		}
 	}()
 
 	closeFn := func() {
-		//nolint:errcheck
-		stream.CloseSend()
+		if err := stream.CloseSend(); err != nil {
+			log.Warnf("failed to close subscription stream: %v", err)
+		}
 		cancel()
 	}
 

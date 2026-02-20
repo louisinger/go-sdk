@@ -2,10 +2,13 @@ package utils
 
 import (
 	"context"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/status"
 )
 
 func MonitorGrpcConn(
@@ -46,5 +49,25 @@ func MonitorGrpcConn(
 				}
 			}
 		}
+	}
+}
+
+// ShouldReconnect checks if a gRPC error should trigger a reconnection attempt
+// and returns the backoff duration if reconnection should be attempted
+func ShouldReconnect(err error) (bool, time.Duration) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return true, time.Second
+	}
+
+	switch st.Code() {
+	case codes.ResourceExhausted:
+		return true, 5 * time.Second // rate limited
+	case codes.Canceled, codes.InvalidArgument: // bad request
+		return false, 0
+	case codes.Unavailable, codes.Internal, codes.DeadlineExceeded:
+		return true, time.Second
+	default:
+		return true, time.Second
 	}
 }
