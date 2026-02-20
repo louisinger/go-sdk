@@ -945,61 +945,92 @@ func (a *arkClient) DeleteIntent(
 }
 
 func (a *arkClient) listenForArkTxs(ctx context.Context) {
-	eventChan, closeFunc, err := a.client.GetTransactionsStream(ctx)
-	if err != nil {
-		log.WithError(err).Error("failed to get transaction stream")
-		return
-	}
-	defer closeFunc()
+	const (
+		maxReconnectDelay = 30 * time.Second
+		baseReconnectDelay = 1 * time.Second
+	)
 
+	reconnectDelay := baseReconnectDelay
 	ctxBg := context.Background()
+
 	for {
 		select {
-		case event, ok := <-eventChan:
-			if !ok {
-				continue
-			}
-			if errors.Is(event.Err, io.EOF) {
-				closeFunc()
-				return
-			}
-
-			if event.Err != nil {
-				log.WithError(event.Err).Warn("received error in transaction stream")
-				continue
-			}
-
-			_, offchainAddrs, _, _, err := a.wallet.GetAddresses(ctx)
-			if err != nil {
-				log.WithError(err).Error("failed to get offchain addresses")
-				continue
-			}
-
-			myScripts := make(map[string]struct{})
-			for _, addr := range offchainAddrs {
-				// nolint
-				decoded, _ := arklib.DecodeAddressV0(addr.Address)
-				// nolint
-				vtxoScript, _ := script.P2TRScript(decoded.VtxoTapKey)
-				myScripts[hex.EncodeToString(vtxoScript)] = struct{}{}
-			}
-
-			if event.CommitmentTx != nil {
-				if err := a.handleCommitmentTx(ctxBg, myScripts, event.CommitmentTx); err != nil {
-					log.WithError(err).Error("failed to process commitment tx")
-					continue
-				}
-			}
-
-			if event.ArkTx != nil {
-				if err := a.handleArkTx(ctxBg, myScripts, event.ArkTx); err != nil {
-					log.WithError(err).Error("failed to process ark tx")
-					continue
-				}
-			}
 		case <-ctx.Done():
+			log.Info("transaction stream listener stopped: context cancelled")
 			return
+		default:
 		}
+
+		eventChan, closeFunc, err := a.client.GetTransactionsStream(ctx)
+		if err != nil {
+			log.WithError(err).Warn("failed to get transaction stream, retrying...")
+			time.Sleep(reconnectDelay)
+			reconnectDelay = min(reconnectDelay*2, maxReconnectDelay)
+			continue
+		}
+
+		// Reset backoff on successful connection
+		reconnectDelay = baseReconnectDelay
+		log.Info("transaction stream connected")
+
+		func() {
+			defer closeFunc()
+
+			for {
+				select {
+				case event, ok := <-eventChan:
+					if !ok {
+						log.Warn("transaction stream channel closed, reconnecting...")
+						return
+					}
+
+					if event.Err != nil {
+						if errors.Is(event.Err, io.EOF) || errors.Is(event.Err, client.ErrConnectionClosedByServer) {
+							log.Warn("transaction stream disconnected (EOF), reconnecting...")
+							return
+						}
+						log.WithError(event.Err).Warn("received error in transaction stream")
+						continue
+					}
+
+					_, offchainAddrs, _, _, err := a.wallet.GetAddresses(ctx)
+					if err != nil {
+						log.WithError(err).Error("failed to get offchain addresses")
+						continue
+					}
+
+					myScripts := make(map[string]struct{})
+					for _, addr := range offchainAddrs {
+						// nolint
+						decoded, _ := arklib.DecodeAddressV0(addr.Address)
+						// nolint
+						vtxoScript, _ := script.P2TRScript(decoded.VtxoTapKey)
+						myScripts[hex.EncodeToString(vtxoScript)] = struct{}{}
+					}
+
+					if event.CommitmentTx != nil {
+						if err := a.handleCommitmentTx(ctxBg, myScripts, event.CommitmentTx); err != nil {
+							log.WithError(err).Error("failed to process commitment tx")
+							continue
+						}
+					}
+
+					if event.ArkTx != nil {
+						if err := a.handleArkTx(ctxBg, myScripts, event.ArkTx); err != nil {
+							log.WithError(err).Error("failed to process ark tx")
+							continue
+						}
+					}
+				case <-ctx.Done():
+					log.Info("transaction stream listener stopped: context cancelled")
+					return
+				}
+			}
+		}()
+
+		// Add a small delay before reconnecting to avoid hammering the server
+		time.Sleep(reconnectDelay)
+		reconnectDelay = min(reconnectDelay*2, maxReconnectDelay)
 	}
 }
 
